@@ -15,6 +15,7 @@ import string
 import sys
 from urllib.parse import unquote, urlparse
 from fpdf import FPDF
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # default list of sites (used if an external file isn't provided or can't be read)
 # users can supply a file with one template per line. Lines starting with '#' or blank
@@ -40,10 +41,16 @@ NOT_FOUND_MARKERS = [
 ]
 
 
-def check_username(username: str, template: str, timeout: float = 5.0) -> bool:
+def check_username(username: str, template: str, session: requests.Session, timeout: float = 5.0) -> bool:
+    """Return True if the supplied username appears to exist on *template*.
+
+    A :class:`requests.Session` is passed so that callers can reuse the
+    connection pool.  Reusing a session tends to be faster than creating a
+    new connection for every request.
+    """
     url = template.format(username=username)
     try:
-        resp = requests.get(
+        resp = session.get(
             url,
             timeout=timeout,
             allow_redirects=True,
@@ -167,6 +174,13 @@ def main():
         default="site.txt",
         help="path to a file containing URL templates (one per line).",
     )
+    parser.add_argument(
+        "--workers",
+        "-w",
+        type=int,
+        default=8,
+        help="number of concurrent worker threads to use",
+    )
     args = parser.parse_args()
     username = args.username.strip()
     if not username:
@@ -179,17 +193,40 @@ def main():
     control_username = make_control_username()
 
     results = []
-    for template in templates:
-        # If a random username is "found" too, this template is unreliable.
-        if check_username(control_username, template):
-            print(f"Skipping unreliable template: {template}")
-            continue
+    # create a single session for all requests and mount a reasonable adapter
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_maxsize=20, max_retries=1)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
 
-        if check_username(username, template):
-            results.append((template, template.format(username=username)))
-            print(f"Found on: {template.format(username=username)}")
-        else:
-            print(f"Not found on: {template.format(username=username)}")
+    # helper that inspects a single template; returns (template, found, unreliable)
+    def inspect(template: str):
+        if check_username(control_username, template, session):
+            return template, False, True
+        found = check_username(username, template, session)
+        return template, found, False
+
+    # run checks in parallel; allow the user to control the degree of
+    # parallelism via CLI
+    workers = args.workers
+    with ThreadPoolExecutor(max_workers=workers) as exe:
+        futures = {exe.submit(inspect, tpl): tpl for tpl in templates}
+        for fut in as_completed(futures):
+            tpl = futures[fut]
+            try:
+                template, found, unreliable = fut.result()
+            except Exception:
+                print(f"error checking {tpl}")
+                continue
+
+            if unreliable:
+                print(f"Skipping unreliable template: {template}")
+                continue
+            if found:
+                results.append((template, template.format(username=username)))
+                print(f"Found on: {template.format(username=username)}")
+            else:
+                print(f"Not found on: {template.format(username=username)}")
     if results:
         generate_pdf(results, args.output)
         print(f"Results written to {args.output}")
