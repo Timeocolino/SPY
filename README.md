@@ -13,7 +13,7 @@ SPY est un outil pour vos recherches durant des CTFS ou de l'investigation qui v
 ## Utilisation
 
 ```sh
-python username_search.py <pseudo> [--output fichier.pdf]
+python username_search.py <pseudo> 
 ```
 
 Le script vérifie une liste de sites connus et génère un PDF contenant les URLs où le pseudo existe. Les sites qui renvoient une erreur 404 sont ignorés.
